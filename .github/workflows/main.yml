@@ -1,0 +1,100 @@
+name: Deploy to AWS
+
+# ワークフローのトリガー設定
+on:
+  push:
+    branches:
+      - main  # mainブランチへのプッシュ時に実行
+  workflow_dispatch:  # 手動実行も可能
+
+# 環境変数の設定
+env:
+  AWS_REGION: ap-northeast-1  # AWSリージョン
+  STACK_NAME: react-app-stack  # CloudFormationスタック名
+  ENVIRONMENT: prod  # デプロイ環境
+
+# GitHub Actionsの権限設定
+permissions:
+  id-token: write  # OIDCトークン生成用
+  contents: read   # リポジトリ読み取り用
+
+jobs:
+  # テストジョブ: デプロイ前の品質チェック
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4  # リポジトリのチェックアウト
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'  # 依存関係のキャッシュを有効化
+
+      - name: Install dependencies
+        run: npm ci  # クリーンインストール
+
+      - name: Run tests
+        run: npm run test:ci  # CIモードでテストを実行
+
+  # デプロイジョブ: インフラ構築とアプリケーションのデプロイ
+  deploy:
+    needs: test  # テストジョブの成功を待ってから実行
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # AWS認証情報の設定
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}  # IAMロールのARN
+          aws-region: ${{ env.AWS_REGION }}
+          pass_word: ${{ secrets.VITE_PASSWORD }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      # アプリケーションのビルド
+      - name: Build
+        run: npm run build
+        env:
+          VITE_AWS_ACCESSKEY_ID: ${{ secrets.VITE_AWS_ACCESSKEY_ID }}
+          VITE_AWS_SECRET_ACCESSKEY: ${{ secrets.VITE_AWS_SECRET_ACCESSKEY }}
+
+      # CloudFormationスタックのデプロイ
+      - name: Deploy CloudFormation stack
+        run: |
+          aws cloudformation deploy \
+            --template-file infrastructure/cloudformation.yml \
+            --stack-name ${{ env.STACK_NAME }} \
+            --parameter-overrides \
+              Environment=${{ env.ENVIRONMENT }} \
+            --capabilities CAPABILITY_IAM \
+            --no-fail-on-empty-changeset
+
+      # S3バケットへのファイルアップロード
+      - name: Upload to S3
+        run: |
+          BUCKET_NAME=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`WebsiteBucketName`].OutputValue' \
+            --output text)
+          aws s3 sync dist/ s3://$BUCKET_NAME/ --delete  # 不要なファイルを削除しながら同期
+
+      # CloudFrontのキャッシュ削除
+      - name: Invalidate CloudFront cache
+        run: |
+          DISTRIBUTION_ID=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`CloudFrontDistributionId`].OutputValue' \
+            --output text)
+          aws cloudfront create-invalidation \
+            --distribution-id $DISTRIBUTION_ID \
+            --paths "/*"  # 全パスのキャッシュを削除
