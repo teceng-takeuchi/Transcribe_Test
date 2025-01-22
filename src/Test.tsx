@@ -1,5 +1,6 @@
 import React, { useRef, useState } from "react";
 import { TranscribeStreamingClient, StartStreamTranscriptionCommand } from "@aws-sdk/client-transcribe-streaming";
+import './Test.css';
 
 /**
  * AudioWorklet版。色々めんどくさいが今後の標準仕様。
@@ -12,23 +13,40 @@ export const Test: React.FC = () => {
     const [transcription, setTranscription] = useState<string>("");
     const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
     const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
-    console.log(import.meta.env.VITE_AWS_ACCESSKEY_ID)
+    const videoRef = useRef<HTMLVideoElement>(null);
+    // 字幕のスタイル設定
+    const [currentSubtitle, setCurrentSubtitle] = useState<string>("");
+    
 
     const startTranscription = async () => {
+        // 既存のAudioContextをクリーンアップ
+        if (audioContext && audioContext.state !== 'closed') {
+            await audioContext.close();
+        }
         isRecording.current = true;
         setIsRecordingState(true);
 
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        // オーディオとビデオの両方を取得
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+            audio: true,
+            video: true 
+        });
         setMediaStream(stream);
 
-        const audioCtx = audioContext ? audioContext : new AudioContext();
-        setAudioContext(audioCtx);
+        // ビデオ要素にストリームを設定
+        if (videoRef.current) {
+            videoRef.current.srcObject = stream;
+        }
+
+        // 新しいAudioContextを作成
+        const newAudioContext = new AudioContext();
+        setAudioContext(newAudioContext);
 
         // AudioWorkletモジュールをロード
-        await audioCtx.audioWorklet.addModule("/audio-processor.js");
+        await newAudioContext.audioWorklet.addModule("/audio-processor.js");
 
-        const input = audioCtx.createMediaStreamSource(stream);
-        const processor = new AudioWorkletNode(audioCtx, "audio-processor");
+        const input = newAudioContext.createMediaStreamSource(stream);
+        const processor = new AudioWorkletNode(newAudioContext, "audio-processor");
 
         const transcribeClient = new TranscribeStreamingClient({
             region: "ap-northeast-1", // 適切なAWSリージョンを設定
@@ -46,7 +64,7 @@ export const Test: React.FC = () => {
             };
 
             input.connect(processor);
-            processor.connect(audioCtx.destination);
+            processor.connect(newAudioContext.destination);
 
             while (isRecording.current) {
                 if (audioChunks.length > 0) {
@@ -67,12 +85,16 @@ export const Test: React.FC = () => {
         try {
             const response = await transcribeClient.send(command);
             for await (const event of response.TranscriptResultStream!) {
-
                 if (event.TranscriptEvent) {
                     const results = event.TranscriptEvent.Transcript!.Results;
-                    console.log(results)
-                    if (results!.length > 0 && !results![0].IsPartial) {
-                        setTranscription((prev) => prev + " " + results![0].Alternatives![0].Transcript);
+                    if (results!.length > 0) {
+                        const transcript = results![0].Alternatives![0].Transcript;
+                        if (!results![0].IsPartial) {
+                            // 確定した文字起こしを全体の文字起こしに追加
+                            setTranscription((prev) => prev + " " + transcript);
+                        }
+                        // 部分的な文字起こしも含めて字幕として表示
+                        setCurrentSubtitle(transcript ?? "");
                     }
                 }
             }
@@ -84,12 +106,21 @@ export const Test: React.FC = () => {
     const stopTranscription = () => {
         isRecording.current = false;
         setIsRecordingState(false); // UIを更新
+        setCurrentSubtitle(""); // 字幕をクリア
+        setTranscription(""); // 文字起こし履歴をクリア
+        
         if (mediaStream) {
             mediaStream.getTracks().forEach((track) => track.stop());
         }
 
-        if (audioContext && audioContext.state !== "closed") {
-            audioContext.close(); // AudioContextが閉じられていない場合のみclose()
+        // AudioContextのクローズ処理を修正
+        if (audioContext && audioContext.state !== 'closed') {
+            audioContext.close();
+        }
+
+        // ビデオストリームをクリア
+        if (videoRef.current) {
+            videoRef.current.srcObject = null;
         }
     };
 
@@ -101,14 +132,31 @@ export const Test: React.FC = () => {
         return int16Array;
     };
 
-
     return (
-        <div>
+        <div className="test-container">
             <h1>AudioWorklet</h1>
             <button onClick={() => (isRecording.current ? stopTranscription() : startTranscription())}>
                 {isRecordingState ? "停止" : "開始"}
             </button>
-            <div style={{ marginTop: "20px", border: "1px solid #ccc", padding: "10px", height: "200px", overflowY: "scroll" }}>
+            
+            {/* ビデオと字幕を表示するコンテナ */}
+            <div className="video-container">
+                <video
+                    ref={videoRef}
+                    autoPlay
+                    playsInline
+                    className="video-element"
+                />
+                {/* 字幕オーバーレイ */}
+                {currentSubtitle && (
+                    <div className="subtitle-overlay">
+                        {currentSubtitle}
+                    </div>
+                )}
+            </div>
+
+            {/* 文字起こし履歴 */}
+            <div className="transcription-history">
                 <p>{transcription}</p>
             </div>
         </div>
