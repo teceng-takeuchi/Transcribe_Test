@@ -31,22 +31,37 @@ export const Test: React.FC = () => {
             audio: true,
             video: true 
         });
+
         setMediaStream(stream);
 
-        // ビデオ要素にストリームを設定
+        // ビデオ要素にストリームを設定（音声出力のみを無効化）
         if (videoRef.current) {
             videoRef.current.srcObject = stream;
+            videoRef.current.muted = true;  // ビデオ要素の音声出力のみを無効化
         }
 
         // 新しいAudioContextを作成
-        const newAudioContext = new AudioContext();
+        const newAudioContext = new AudioContext({
+            sampleRate: 44100,
+            latencyHint: 'interactive'
+        });
         setAudioContext(newAudioContext);
 
         // AudioWorkletモジュールをロード
         await newAudioContext.audioWorklet.addModule("/audio-processor.js");
 
         const input = newAudioContext.createMediaStreamSource(stream);
-        const processor = new AudioWorkletNode(newAudioContext, "audio-processor");
+        const processor = new AudioWorkletNode(newAudioContext, "audio-processor", {
+            numberOfOutputs: 0,  // 出力を無効化
+            numberOfInputs: 1,   // 入力は有効
+            channelCount: 1
+        });
+
+        // 入力のみを接続（出力は接続しない）
+        input.connect(processor);
+        
+        // 明示的に出力を切断
+        processor.disconnect();
 
         const transcribeClient = new TranscribeStreamingClient({
             region: "ap-northeast-1", // 適切なAWSリージョンを設定
@@ -62,9 +77,6 @@ export const Test: React.FC = () => {
                 const audioData = event.data;
                 audioChunks.push(audioData);
             };
-
-            input.connect(processor);
-            processor.connect(newAudioContext.destination);
 
             while (isRecording.current) {
                 if (audioChunks.length > 0) {
